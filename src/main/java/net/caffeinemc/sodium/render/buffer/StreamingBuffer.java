@@ -5,7 +5,7 @@ import net.caffeinemc.gfx.api.buffer.BufferMapFlags;
 import net.caffeinemc.gfx.api.buffer.BufferStorageFlags;
 import net.caffeinemc.gfx.api.buffer.MappedBuffer;
 import net.caffeinemc.gfx.api.device.RenderDevice;
-import net.minecraft.util.math.MathHelper;
+import net.caffeinemc.sodium.util.MathUtil;
 import org.apache.commons.lang3.Validate;
 import org.lwjgl.system.MemoryUtil;
 
@@ -17,19 +17,21 @@ public class StreamingBuffer {
     private final MappedBuffer buffer;
     private final int frameCount;
     private final int stride;
+    private final int alignedStride;
 
     public StreamingBuffer(RenderDevice device, Set<BufferStorageFlags> storageFlags, Set<BufferMapFlags> mapFlags,
-                           int capacity, int frameCount) {
-        var alignment = device.properties().uniformBufferOffsetAlignment();
+                           int stride, int frameCount) {
+        var alignment = device.properties().uniformBufferOffsetAlignment;
 
-        this.stride = MathHelper.roundUpToMultiple(capacity, alignment);
-        this.buffer = device.createMappedBuffer(this.stride * frameCount, storageFlags, mapFlags);
+        this.stride = stride;
+        this.alignedStride = MathUtil.align(stride, alignment);
+        this.buffer = device.createMappedBuffer(this.alignedStride * frameCount, storageFlags, mapFlags);
         this.frameCount = frameCount;
         this.device = device;
     }
 
     public Slice slice(int frameIndex) {
-        int start = this.stride * (frameIndex % this.frameCount);
+        int start = this.alignedStride * (frameIndex % this.frameCount);
         var view = MemoryUtil.memSlice(this.buffer.view(), start, this.stride);
 
         return new Slice(this.buffer, view, start, this.stride);

@@ -7,6 +7,7 @@ import net.caffeinemc.sodium.SodiumClientMod;
 import net.caffeinemc.sodium.interop.vanilla.math.frustum.Frustum;
 import net.caffeinemc.sodium.interop.vanilla.mixin.WorldRendererHolder;
 import net.caffeinemc.sodium.render.chunk.RenderSectionManager;
+import net.caffeinemc.sodium.render.chunk.draw.ChunkCameraContext;
 import net.caffeinemc.sodium.render.chunk.draw.ChunkRenderMatrices;
 import net.caffeinemc.sodium.render.chunk.passes.ChunkRenderPass;
 import net.caffeinemc.sodium.render.chunk.passes.ChunkRenderPassManager;
@@ -48,8 +49,6 @@ public class SodiumWorldRenderer {
     private float lastFogDistance;
 
     private boolean useEntityCulling;
-
-    private final Set<BlockEntity> globalBlockEntities = new ObjectOpenHashSet<>();
 
     private RenderSectionManager renderSectionManager;
     private ChunkRenderPassManager renderPassManager;
@@ -118,8 +117,6 @@ public class SodiumWorldRenderer {
             this.renderSectionManager.destroy();
             this.renderSectionManager = null;
         }
-
-        this.globalBlockEntities.clear();
 
         this.chunkTracker = null;
         this.world = null;
@@ -199,7 +196,7 @@ public class SodiumWorldRenderer {
         if (this.renderSectionManager.isGraphDirty()) {
             profiler.swap("chunk_graph_rebuild");
 
-            this.renderSectionManager.update(camera, frustum, frame, spectator);
+            this.renderSectionManager.update(new ChunkCameraContext(camera), frustum, spectator);
         }
 
         profiler.swap("visible_chunk_tick");
@@ -277,7 +274,7 @@ public class SodiumWorldRenderer {
             matrices.pop();
         }
 
-        for (BlockEntity blockEntity : this.globalBlockEntities) {
+        for (BlockEntity blockEntity : this.renderSectionManager.getGlobalBlockEntities()) {
             BlockPos pos = blockEntity.getPos();
 
             matrices.push();
@@ -305,12 +302,6 @@ public class SodiumWorldRenderer {
         }
     }
 
-    public void onChunkRenderUpdated(int x, int y, int z, ChunkRenderData meshBefore, ChunkRenderData meshAfter) {
-        ListUtil.updateList(this.globalBlockEntities, meshBefore.getGlobalBlockEntities(), meshAfter.getGlobalBlockEntities());
-
-        this.renderSectionManager.onChunkRenderUpdates(x, y, z, meshAfter);
-    }
-
     /**
      * Returns whether or not the entity intersects with any visible chunks in the graph.
      * @return True if the entity is visible, otherwise false
@@ -336,6 +327,9 @@ public class SodiumWorldRenderer {
         return this.isBoxVisible(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ);
     }
 
+    public boolean doesChunkHaveFlag(int x, int z, int status) {
+        return this.chunkTracker.hasMergedFlags(x, z, status);
+    }
 
     public boolean isBoxVisible(double x1, double y1, double z1, double x2, double y2, double z2) {
         int minX = MathHelper.floor(x1 - 0.5D) >> 4;

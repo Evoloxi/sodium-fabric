@@ -38,6 +38,7 @@ public class DefaultChunkRenderer extends AbstractChunkRenderer {
     private final Program<ChunkShaderInterface> program;
 
     private final StreamingBuffer bufferCameraMatrices;
+
     private final StreamingBuffer bufferFogParameters;
 
     private final SequenceIndexBuffer indexBuffer;
@@ -51,7 +52,7 @@ public class DefaultChunkRenderer extends AbstractChunkRenderer {
         var maxInFlightFrames = SodiumClientMod.options().advanced.cpuRenderAheadLimit + 1;
 
         this.bufferCameraMatrices = new StreamingBuffer(device, storageFlags, mapFlags, 192, maxInFlightFrames);
-        this.bufferFogParameters = new StreamingBuffer(device, storageFlags, mapFlags, 24, maxInFlightFrames);
+        this.bufferFogParameters = new StreamingBuffer(device, storageFlags, mapFlags, 32, maxInFlightFrames);
 
         this.indexBuffer = indexBuffer;
 
@@ -138,6 +139,7 @@ public class DefaultChunkRenderer extends AbstractChunkRenderer {
         fogParamsBuf.putFloat(12, paramFogColor[3]);
         fogParamsBuf.putFloat(16, RenderSystem.getShaderFogStart());
         fogParamsBuf.putFloat(20, RenderSystem.getShaderFogEnd());
+        fogParamsBuf.putInt(24, RenderSystem.getShaderFogShape().getId());
 
         this.bufferFogParameters.flush(fogParams);
 

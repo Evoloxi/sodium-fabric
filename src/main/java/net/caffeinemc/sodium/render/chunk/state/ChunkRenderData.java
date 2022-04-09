@@ -1,15 +1,16 @@
 package net.caffeinemc.sodium.render.chunk.state;
 
-import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import it.unimi.dsi.fastutil.objects.ReferenceOpenHashSet;
 import net.caffeinemc.sodium.render.chunk.passes.ChunkRenderPass;
+import net.caffeinemc.sodium.util.DirectionUtil;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.client.render.chunk.ChunkOcclusionData;
 import net.minecraft.client.texture.Sprite;
 import net.minecraft.util.math.Direction;
 
 import java.util.*;
+import java.util.function.IntFunction;
 
 /**
  * The render data for a chunk render container containing all the information about which meshes are attached, the
@@ -20,58 +21,31 @@ public class ChunkRenderData {
             .build();
     public static final ChunkRenderData EMPTY = createEmptyData();
 
-    private List<BlockEntity> globalBlockEntities;
-    private List<BlockEntity> blockEntities;
+    public final BlockEntity[] globalBlockEntities;
+    public final BlockEntity[] blockEntities;
+    public final Sprite[] animatedSprites;
+    public final ChunkRenderPass[] meshes;
+    public final ChunkRenderBounds bounds;
+    public final long visibilityData;
 
-    private ChunkOcclusionData occlusionData;
-    private ChunkRenderBounds bounds;
-
-    private List<Sprite> animatedSprites;
-
-    private boolean isEmpty;
-
-    /**
-     * @return True if the chunk has no renderables, otherwise false
-     */
-    public boolean isEmpty() {
-        return this.isEmpty;
-    }
-
-    public ChunkRenderBounds getBounds() {
-        return this.bounds;
-    }
-
-    public ChunkOcclusionData getOcclusionData() {
-        return this.occlusionData;
-    }
-
-    public List<Sprite> getAnimatedSprites() {
-        return this.animatedSprites;
-    }
-
-    /**
-     * The collection of block entities contained by this rendered chunk.
-     */
-    public Collection<BlockEntity> getBlockEntities() {
-        return this.blockEntities;
-    }
-
-    /**
-     * The collection of block entities contained by this rendered chunk section which are not part of its culling
-     * volume. These entities should always be rendered regardless of the render being visible in the frustum.
-     */
-    public Collection<BlockEntity> getGlobalBlockEntities() {
-        return this.globalBlockEntities;
+    public ChunkRenderData(BlockEntity[] globalBlockEntities, BlockEntity[] blockEntities, Sprite[] animatedSprites,
+                           ChunkRenderPass[] meshes, ChunkRenderBounds bounds, ChunkOcclusionData occlusionData) {
+        this.globalBlockEntities = globalBlockEntities;
+        this.blockEntities = blockEntities;
+        this.animatedSprites = animatedSprites;
+        this.meshes = meshes;
+        this.bounds = bounds;
+        this.visibilityData = calculateVisibilityData(occlusionData);
     }
 
     public static class Builder {
         private final List<BlockEntity> globalBlockEntities = new ArrayList<>();
-        private final List<BlockEntity> blockEntities = new ArrayList<>();
+        private final List<BlockEntity> localBlockEntities = new ArrayList<>();
         private final Set<Sprite> animatedSprites = new ObjectOpenHashSet<>();
+        private final Set<ChunkRenderPass> meshes = new ReferenceOpenHashSet<>();
 
         private ChunkOcclusionData occlusionData;
         private ChunkRenderBounds bounds = ChunkRenderBounds.ALWAYS_FALSE;
-        private Set<ChunkRenderPass> nonEmptyMeshes = new ReferenceOpenHashSet<>();
 
         public void setBounds(ChunkRenderBounds bounds) {
             this.bounds = bounds;
@@ -98,23 +72,28 @@ public class ChunkRenderData {
          * @param cull True if the block entity can be culled to this chunk render's volume, otherwise false
          */
         public void addBlockEntity(BlockEntity entity, boolean cull) {
-            (cull ? this.blockEntities : this.globalBlockEntities).add(entity);
+            (cull ? this.localBlockEntities : this.globalBlockEntities).add(entity);
         }
 
-        public void addNonEmptyMesh(ChunkRenderPass pass) {
-            this.nonEmptyMeshes.add(pass);
+        public void addMesh(ChunkRenderPass pass) {
+            this.meshes.add(pass);
         }
 
         public ChunkRenderData build() {
-            ChunkRenderData data = new ChunkRenderData();
-            data.globalBlockEntities = this.globalBlockEntities;
-            data.blockEntities = this.blockEntities;
-            data.occlusionData = this.occlusionData;
-            data.bounds = this.bounds;
-            data.animatedSprites = new ObjectArrayList<>(this.animatedSprites);
-            data.isEmpty = this.nonEmptyMeshes.isEmpty() && this.globalBlockEntities.isEmpty() && this.blockEntities.isEmpty();
+            var globalBlockEntities = toArray(this.globalBlockEntities, BlockEntity[]::new);
+            var blockEntities = toArray(this.localBlockEntities, BlockEntity[]::new);
+            var animatedSprites = toArray(this.animatedSprites, Sprite[]::new);
+            var meshes = toArray(this.meshes, ChunkRenderPass[]::new);
 
-            return data;
+            return new ChunkRenderData(globalBlockEntities, blockEntities, animatedSprites, meshes, this.bounds, this.occlusionData);
+        }
+
+        private static <T> T[] toArray(Collection<T> collection, IntFunction<T[]> factory) {
+            if (collection.isEmpty()) {
+                return null;
+            }
+
+            return collection.toArray(factory);
         }
     }
 
@@ -126,5 +105,19 @@ public class ChunkRenderData {
         meshInfo.setOcclusionData(occlusionData);
 
         return meshInfo.build();
+    }
+
+    private static long calculateVisibilityData(ChunkOcclusionData occlusionData) {
+        long bits = 0L;
+
+        for (var from : DirectionUtil.ALL_DIRECTIONS) {
+            for (var to : DirectionUtil.ALL_DIRECTIONS) {
+                if (occlusionData == null || occlusionData.isVisibleThrough(from, to)) {
+                    bits |= (1L << ((from.ordinal() << 3) + to.ordinal()));
+                }
+            }
+        }
+
+        return bits;
     }
 }

@@ -1,14 +1,19 @@
 package net.caffeinemc.sodium.render.chunk.draw;
 
 import it.unimi.dsi.fastutil.objects.Reference2ReferenceArrayMap;
+import it.unimi.dsi.fastutil.objects.Reference2ReferenceMap;
+import it.unimi.dsi.fastutil.objects.ReferenceArrayList;
 import net.caffeinemc.gfx.api.buffer.*;
 import net.caffeinemc.gfx.api.device.RenderDevice;
-import net.caffeinemc.sodium.render.buffer.VertexRange;
 import net.caffeinemc.sodium.render.chunk.RenderSection;
 import net.caffeinemc.sodium.render.chunk.passes.ChunkRenderPass;
 import net.caffeinemc.sodium.render.chunk.passes.DefaultRenderPasses;
+import net.caffeinemc.sodium.render.chunk.region.RenderRegionManager;
+import net.caffeinemc.sodium.render.chunk.state.ChunkRenderBounds;
+import net.caffeinemc.sodium.render.chunk.state.UploadedChunkGeometry.ModelPart;
 import net.caffeinemc.sodium.render.terrain.quad.properties.ChunkMeshFace;
-import net.minecraft.util.math.MathHelper;
+import net.caffeinemc.sodium.util.MathUtil;
+import net.minecraft.util.math.ChunkSectionPos;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.BufferOverflowException;
@@ -19,16 +24,19 @@ public class ChunkPrep {
     private static final int COMMAND_STRUCT_STRIDE = 20;
     private static final int INSTANCE_STRUCT_STRIDE = 16;
 
-    public static Map<ChunkRenderPass, PreparedRenderList> createRenderLists(RenderDevice device, ChunkRenderList list, ChunkCameraContext camera) {
-        if (list.regionCount() <= 0) {
+    public static Map<ChunkRenderPass, PreparedRenderList> createRenderLists(RenderDevice device, RenderRegionManager regionManager,
+                                                                             ReferenceArrayList<RenderSection> unsortedChunks, ChunkCameraContext camera) {
+        if (unsortedChunks.isEmpty()) {
             return null;
         }
 
-        var builders = new Reference2ReferenceArrayMap<ChunkRenderPass, RenderListBuilder>();
-        var alignment = device.properties().uniformBufferOffsetAlignment();
+        var sortedChunks = new ChunkRenderList(regionManager, unsortedChunks);
 
-        var commandBufferCapacity = commandBufferSize(alignment, list);
-        var instanceBufferCapacity = instanceBufferSize(alignment, list);
+        var builders = new Reference2ReferenceArrayMap<ChunkRenderPass, RenderListBuilder>();
+        var alignment = device.properties().uniformBufferOffsetAlignment;
+
+        var commandBufferCapacity = commandBufferSize(alignment, sortedChunks);
+        var instanceBufferCapacity = instanceBufferSize(alignment, sortedChunks);
 
         for (var pass : DefaultRenderPasses.ALL) {
             builders.put(pass, new RenderListBuilder(device, commandBufferCapacity, instanceBufferCapacity, alignment));
@@ -37,7 +45,7 @@ public class ChunkPrep {
         var largestVertexIndex = 0;
         var reverseOrder = false; // TODO: fix me
 
-        for (var bucketIterator = list.sorted(reverseOrder); bucketIterator.hasNext(); ) {
+        for (var bucketIterator = sortedChunks.sorted(reverseOrder); bucketIterator.hasNext(); ) {
             var bucket = bucketIterator.next();
 
             for (var sectionIterator = bucket.sorted(reverseOrder); sectionIterator.hasNext(); ) {
@@ -46,23 +54,21 @@ public class ChunkPrep {
             }
 
             for (var builder : builders.values()) {
-                var instanceCount = builder.instanceBufferBuilder.pending();
-                var commandCount = builder.commandBufferBuilder.pending();
+                var instanceCount = builder.instanceBufferBuilder.pendingElements();
+                var commandCount = builder.commandBufferBuilder.pendingElements();
 
                 if (commandCount <= 0) {
                     continue;
                 }
 
-                var resources = bucket.region().getResources();
+                var region = bucket.region();
 
                 var instanceData = builder.instanceBufferBuilder.flush();
                 var commandData = builder.commandBufferBuilder.flush();
 
-                var vertexBuffers = resources.vertexBuffers;
-
                 builder.batches.add(new ChunkRenderBatch(
-                        vertexBuffers.getBufferObject(),
-                        vertexBuffers.getStride(),
+                        region.vertexBuffers.getBufferObject(),
+                        region.vertexBuffers.getStride(),
                         instanceCount,
                         commandCount,
                         instanceData,
@@ -79,8 +85,8 @@ public class ChunkPrep {
             var pass = entry.getKey();
             var builder = entry.getValue();
 
-            var commandBuffer = device.createBuffer(builder.commandBuffer, 0, builder.commandBufferBuilder.length());
-            var instanceBuffer = device.createBuffer(builder.instanceBuffer, 0, builder.instanceBufferBuilder.length());
+            var commandBuffer = device.createBuffer(builder.commandBuffer, 0, builder.commandBufferBuilder.position());
+            var instanceBuffer = device.createBuffer(builder.instanceBuffer, 0, builder.instanceBufferBuilder.position());
 
             lists.put(pass, new PreparedRenderList(commandBuffer, instanceBuffer, builder.batches, largestVertexIndex));
         }
@@ -88,18 +94,18 @@ public class ChunkPrep {
         return lists;
     }
 
-    private static void createCommands(RenderSection section, Reference2ReferenceArrayMap<ChunkRenderPass, RenderListBuilder> builders, ChunkCameraContext camera) {
-        var visibility = section.getVisibilityFlags();
+    private static void createCommands(RenderSection section, Reference2ReferenceMap<ChunkRenderPass, RenderListBuilder> builders, ChunkCameraContext camera) {
         var geometry = section.getGeometry();
         var baseVertex = geometry.segment.getOffset();
+
+        var visibility = calculateVisibilityFlags(section.getBounds(), camera);
 
         for (var model : geometry.models) {
             if ((model.visibilityBits & visibility) == 0) {
                 continue;
             }
 
-            var pass = model.pass;
-            var builder = builders.get(pass);
+            var builder = builders.get(model.pass);
 
             if (builder == null) {
                 continue;
@@ -108,26 +114,20 @@ public class ChunkPrep {
             var commandBufferBuilder = builder.commandBufferBuilder;
             var instanceBufferBuilder = builder.instanceBufferBuilder;
 
-            for (int face = 0; face < ChunkMeshFace.COUNT; face++) {
-                if ((visibility & (1 << face)) == 0) {
+            for (var range : model.ranges) {
+                if ((visibility & range) == 0) {
                     continue;
                 }
 
-                var range = model.ranges[face];
+                var vertexCount = ModelPart.unpackVertexCount(range);
+                var firstVertex = baseVertex + ModelPart.unpackFirstVertex(range);
 
-                if (range == VertexRange.NULL) {
-                    continue;
-                }
-
-                var firstVertex = baseVertex + VertexRange.unpackFirstVertex(range);
-                var vertexCount = VertexRange.unpackVertexCount(range);
-
-                commandBufferBuilder.push(firstVertex, vertexCount, instanceBufferBuilder.pending());
+                commandBufferBuilder.push(vertexCount, firstVertex, instanceBufferBuilder.pendingElements());
             }
 
-            float x = getCameraTranslation(section.getOriginX(), camera.blockX, camera.deltaX);
-            float y = getCameraTranslation(section.getOriginY(), camera.blockY, camera.deltaY);
-            float z = getCameraTranslation(section.getOriginZ(), camera.blockZ, camera.deltaZ);
+            float x = getCameraTranslation(ChunkSectionPos.getBlockCoord(section.getChunkX()), camera.blockX, camera.deltaX);
+            float y = getCameraTranslation(ChunkSectionPos.getBlockCoord(section.getChunkY()), camera.blockY, camera.deltaY);
+            float z = getCameraTranslation(ChunkSectionPos.getBlockCoord(section.getChunkZ()), camera.blockZ, camera.deltaZ);
 
             instanceBufferBuilder.push(x, y, z);
 
@@ -170,7 +170,6 @@ public class ChunkPrep {
         public int maxVertexIndex;
 
         private RenderListBuilder(RenderDevice device, long commandBufferCapacity, long instanceBufferCapacity, int alignment) {
-            // TODO: we're mapping as persistent, but this is unnecessary
             this.commandBuffer = device.allocateBuffer(commandBufferCapacity, false);
             this.instanceBuffer = device.allocateBuffer(instanceBufferCapacity, false);
 
@@ -181,7 +180,6 @@ public class ChunkPrep {
 
     private static abstract class BufferBuilder {
         protected final ByteBuffer buffer;
-        protected final long addr;
 
         protected final int alignment;
         protected final int stride;
@@ -189,48 +187,41 @@ public class ChunkPrep {
         protected final int capacity;
 
         protected int count;
-        protected int mark;
-        protected int position;
+        protected int limit;
+
+        protected long ptr;
 
         private BufferBuilder(ByteBuffer buffer, int alignment, int stride) {
             this.buffer = buffer;
             this.alignment = alignment;
             this.stride = stride;
-
-            this.position = buffer.position();
             this.capacity = buffer.capacity();
 
-            this.addr = MemoryUtil.memAddress(this.buffer);
+            this.count = 0;
+            this.limit = buffer.limit() / stride;
+
+            this.ptr = MemoryUtil.memAddress(this.buffer);
         }
 
         public BufferSlice flush() {
-            var slice = new BufferSlice(this.mark, this.count * this.stride);
+            var position = this.position();
 
+            var length = this.count * this.stride;
+            var slice = new BufferSlice(position - length, length);
+
+            this.ptr = MemoryUtil.memAddress(this.buffer, MathUtil.align(position, this.alignment));
+            this.limit -= this.count;
             this.count = 0;
-            this.position = MathHelper.roundUpToMultiple(this.position, this.alignment);
-            this.mark = this.position;
 
             return slice;
         }
 
-        protected long next() {
-            if (this.position + this.stride > this.capacity) {
-                throw new BufferOverflowException();
-            }
-
-            var ptr = this.addr + this.position;
-            this.position += this.stride;
-            this.count++;
-
-            return ptr;
-        }
-
-        public int pending() {
+        public int pendingElements() {
             return this.count;
         }
 
-        public int length() {
-            return this.position;
+        public int position() {
+            return (int) (this.ptr - MemoryUtil.memAddress(this.buffer));
         }
     }
 
@@ -239,13 +230,20 @@ public class ChunkPrep {
             super(buffer, alignment, COMMAND_STRUCT_STRIDE);
         }
 
-        public void push(int vertexStart, int vertexCount, int baseInstance) {
-            long ptr = this.next();
+        public void push(int vertexCount, int vertexStart, int baseInstance) {
+            if (this.count >= this.limit) {
+                throw new BufferOverflowException();
+            }
+
+            long ptr = this.ptr;
             MemoryUtil.memPutInt(ptr + 0, vertexCount);
             MemoryUtil.memPutInt(ptr + 4, 1);
             MemoryUtil.memPutInt(ptr + 8, 0);
             MemoryUtil.memPutInt(ptr + 12, vertexStart);
             MemoryUtil.memPutInt(ptr + 16, baseInstance);
+
+            this.ptr += COMMAND_STRUCT_STRIDE;
+            this.count++;
         }
     }
 
@@ -255,10 +253,17 @@ public class ChunkPrep {
         }
 
         public void push(float x, float y, float z) {
-            long ptr = this.next();
+            if (this.count >= this.limit) {
+                throw new BufferOverflowException();
+            }
+
+            long ptr = this.ptr;
             MemoryUtil.memPutFloat(ptr + 0, x);
             MemoryUtil.memPutFloat(ptr + 4, y);
             MemoryUtil.memPutFloat(ptr + 8, z);
+
+            this.ptr += INSTANCE_STRUCT_STRIDE;
+            this.count++;
         }
     }
 
@@ -270,7 +275,7 @@ public class ChunkPrep {
         int size = 0;
 
         for (var bucket : list.unsorted()) {
-            size += MathHelper.roundUpToMultiple((bucket.size() * ChunkMeshFace.COUNT) * COMMAND_STRUCT_STRIDE, alignment);
+            size += MathUtil.align((bucket.size() * ChunkMeshFace.COUNT) * COMMAND_STRUCT_STRIDE, alignment);
         }
 
         return size;
@@ -280,7 +285,7 @@ public class ChunkPrep {
         int size = 0;
 
         for (var bucket : list.unsorted()) {
-            size += MathHelper.roundUpToMultiple(bucket.size() * INSTANCE_STRUCT_STRIDE, alignment);
+            size += MathUtil.align(bucket.size() * INSTANCE_STRUCT_STRIDE, alignment);
         }
 
         return size;
@@ -289,4 +294,35 @@ public class ChunkPrep {
     private static float getCameraTranslation(int chunkBlockPos, int cameraBlockPos, float cameraPos) {
         return (chunkBlockPos - cameraBlockPos) - cameraPos;
     }
+
+    private static int calculateVisibilityFlags(ChunkRenderBounds bounds, ChunkCameraContext camera) {
+        int flags = ChunkMeshFace.UNASSIGNED_BITS;
+
+        if (camera.posY > bounds.y1) {
+            flags |= ChunkMeshFace.UP_BITS;
+        }
+
+        if (camera.posY < bounds.y2) {
+            flags |= ChunkMeshFace.DOWN_BITS;
+        }
+
+        if (camera.posX > bounds.x1) {
+            flags |= ChunkMeshFace.EAST_BITS;
+        }
+
+        if (camera.posX < bounds.x2) {
+            flags |= ChunkMeshFace.WEST_BITS;
+        }
+
+        if (camera.posZ > bounds.z1) {
+            flags |= ChunkMeshFace.SOUTH_BITS;
+        }
+
+        if (camera.posZ < bounds.z2) {
+            flags |= ChunkMeshFace.NORTH_BITS;
+        }
+
+        return flags;
+    }
+
 }
